@@ -1,0 +1,822 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+    getAuth, 
+    signInWithCustomToken, 
+    onAuthStateChanged, 
+    signOut, 
+    signInAnonymously,
+    createUserWithEmailAndPassword, // Новий імпорт для реєстрації
+    signInWithEmailAndPassword      // Новий імпорт для входу з поштою та паролем
+} from 'firebase/auth';
+import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, orderBy } from 'firebase/firestore';
+import { createPortal } from 'react-dom';
+import { 
+    Lock, 
+    Eye, 
+    EyeOff, 
+    Plus, 
+    Trash, 
+    Copy, 
+    Power, 
+    LogIn, 
+    UserPlus, 
+    ArrowLeftRight 
+} from 'lucide-react';
+
+const App = () => {
+    // --- Конфігурація та ініціалізація Firebase ---
+    // Глобальні змінні, що надаються середовищем Canvas
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    useEffect(() => {
+        const initFirebase = async () => {
+            try {
+                if (Object.keys(firebaseConfig).length > 0) {
+                    const app = initializeApp(firebaseConfig);
+                    const firestore = getFirestore(app);
+                    const authInstance = getAuth(app);
+
+                    setDb(firestore);
+                    setAuth(authInstance);
+
+                    // Якщо токен недоступний, ми будемо чекати на дії користувача (реєстрацію/вхід)
+                    // Слухач для відстеження змін стану автентифікації
+                    onAuthStateChanged(authInstance, (user) => {
+                        if (user) {
+                            setUserId(user.uid);
+                            console.log("Firebase Auth State Changed: User logged in", user.uid);
+                        } else {
+                            setUserId(null);
+                            console.log("Firebase Auth State Changed: User logged out");
+                        }
+                        setIsAuthReady(true);
+                    });
+                } else {
+                    console.error("Firebase config is missing.");
+                    setIsAuthReady(true);
+                }
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                setIsAuthReady(true);
+            }
+        };
+
+        initFirebase();
+    }, [firebaseConfig]);
+
+    // --- Стан застосунку ---
+    const [passwords, setPasswords] = useState([]);
+    const [masterPassword, setMasterPassword] = useState('');
+    const [userEmail, setUserEmail] = useState('');
+    const [loginPassword, setLoginPassword] = useState('');
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
+    const [loginMessage, setLoginMessage] = useState('');
+    const [messageBox, setMessageBox] = useState({ message: '', visible: false });
+    const [searchTerm, setSearchTerm] = useState('');
+    const [categoryFilter, setCategoryFilter] = useState('');
+    const [allCategories, setAllCategories] = useState([]);
+    const [loginMode, setLoginMode] = useState('login'); // 'login' or 'register'
+    const [showMasterPassword, setShowMasterPassword] = useState(false);
+    const [showLoginPassword, setShowLoginPassword] = useState(false);
+
+    // --- Генератор паролів ---
+    const [genLength, setGenLength] = useState(12);
+    const [genUppercase, setGenUppercase] = useState(true);
+    const [genLowercase, setGenLowercase] = useState(true);
+    const [genNumbers, setGenNumbers] = useState(true);
+    const [genSymbols, setGenSymbols] = useState(false);
+    const [generatedPassword, setGeneratedPassword] = useState('');
+
+    // --- Екран входу ---
+    const [showLoginModal, setShowLoginModal] = useState(true);
+
+    // --- Допоміжні функції ---
+    const showMessage = (message, duration = 3000) => {
+        setMessageBox({ message, visible: true });
+        setTimeout(() => setMessageBox({ message: '', visible: false }), duration);
+    };
+
+    // --- Логіка шифрування/дешифрування ---
+    const encrypt = (data, key) => {
+        try {
+            return CryptoJS.AES.encrypt(JSON.stringify(data), key).toString();
+        } catch (e) {
+            console.error("Помилка шифрування:", e);
+            showMessage("Помилка шифрування даних.");
+            return null;
+        }
+    };
+
+    const decrypt = (encryptedData, key) => {
+        try {
+            const bytes = CryptoJS.AES.decrypt(encryptedData, key);
+            const decryptedString = bytes.toString(CryptoJS.enc.Utf8);
+            return JSON.parse(decryptedString);
+        } catch (e) {
+            console.error("Помилка дешифрування:", e);
+            return null;
+        }
+    };
+
+    const hashMasterPassword = (password) => {
+        return CryptoJS.SHA256(password).toString();
+    };
+
+    // --- Логіка Firebase & Firestore ---
+    const getMasterPasswordHash = async (uid) => {
+        if (!db || !uid) return null;
+        const masterDocRef = doc(db, `/artifacts/${appId}/users/${uid}/private`, 'master');
+        const docSnap = await getDoc(masterDocRef);
+        return docSnap.exists() ? docSnap.data().hash : null;
+    };
+
+    const saveMasterPasswordHash = async (uid, hash) => {
+        if (!db || !uid) return;
+        const masterDocRef = doc(db, `/artifacts/${appId}/users/${uid}/private`, 'master');
+        await setDoc(masterDocRef, { hash });
+    };
+    
+    // Нова функція для реєстрації
+    const handleRegister = async () => {
+        if (!userEmail || !loginPassword || !masterPassword) {
+            setLoginMessage("Будь ласка, заповніть усі поля.");
+            return;
+        }
+        setLoginMessage('');
+        try {
+            const userCredential = await createUserWithEmailAndPassword(auth, userEmail, loginPassword);
+            const uid = userCredential.user.uid;
+            
+            // Зберегти хеш майстер-пароля
+            await saveMasterPasswordHash(uid, hashMasterPassword(masterPassword));
+            
+            setIsLoggedIn(true);
+            setShowLoginModal(false);
+            showMessage("Реєстрація успішна! Ласкаво просимо.");
+        } catch (error) {
+            console.error("Помилка реєстрації:", error);
+            setLoginMessage(`Помилка: ${error.message}`);
+        }
+    };
+
+    // Оновлена функція входу
+    const handleLogin = async () => {
+        if (!userEmail || !loginPassword || !masterPassword) {
+            setLoginMessage("Будь ласка, заповніть усі поля.");
+            return;
+        }
+        setLoginMessage('');
+
+        try {
+            const userCredential = await signInWithEmailAndPassword(auth, userEmail, loginPassword);
+            const uid = userCredential.user.uid;
+            
+            const storedHash = await getMasterPasswordHash(uid);
+            
+            if (storedHash === hashMasterPassword(masterPassword)) {
+                setIsLoggedIn(true);
+                setShowLoginModal(false);
+                showMessage("Вхід успішний!");
+            } else {
+                // Вийти, якщо майстер-пароль не збігається
+                await signOut(auth);
+                setLoginMessage("Неправильний майстер-пароль.");
+            }
+        } catch (error) {
+            console.error("Помилка входу:", error);
+            setLoginMessage(`Помилка: ${error.message}`);
+        }
+    };
+
+    const handleLogout = async () => {
+        if (auth) {
+            await signOut(auth);
+            window.location.reload(); 
+        }
+    };
+
+    // Завантаження записів з Firestore
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId || !isLoggedIn) {
+            setPasswords([]);
+            return;
+        }
+        
+        const passwordsCollectionRef = collection(db, `/artifacts/${appId}/users/${userId}/passwords`);
+        
+        const unsubscribe = onSnapshot(passwordsCollectionRef, (snapshot) => {
+            try {
+                const fetchedEntries = snapshot.docs.map(doc => {
+                    const encryptedData = doc.data().encryptedData;
+                    const decryptedData = decrypt(encryptedData, masterPassword);
+                    return decryptedData ? { ...decryptedData, id: doc.id } : null;
+                }).filter(entry => entry !== null);
+                
+                const sortedEntries = fetchedEntries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+                setPasswords(sortedEntries);
+                populateCategoryFilter(sortedEntries);
+            } catch (error) {
+                console.error("Помилка завантаження/дешифрування:", error);
+                setPasswords([]);
+                setIsLoggedIn(false);
+                setShowLoginModal(true);
+                setLoginMessage("Не вдалося розшифрувати дані. Будь ласка, перевірте майстер-пароль.");
+            }
+        });
+
+        return () => unsubscribe(); 
+    }, [db, userId, isLoggedIn, masterPassword, isAuthReady]);
+
+    // Збереження записів у Firestore
+    const saveEntry = async (entry) => {
+        if (!db || !userId || !isLoggedIn) {
+            showMessage("Помилка: не увійшли. Неможливо зберегти.");
+            return;
+        }
+
+        const encryptedData = encrypt(entry, masterPassword);
+        if (!encryptedData) {
+            return;
+        }
+        
+        try {
+            const entryData = { encryptedData };
+            const passwordsCollectionRef = collection(db, `/artifacts/${appId}/users/${userId}/passwords`);
+            
+            if (entry.id) {
+                const docRef = doc(passwordsCollectionRef, entry.id);
+                await setDoc(docRef, entryData); 
+                showMessage('Запис оновлено успішно!');
+            } else {
+                await addDoc(passwordsCollectionRef, entryData);
+                showMessage('Новий запис додано успішно!');
+            }
+        } catch (error) {
+            console.error("Помилка збереження запису:", error);
+            showMessage("Помилка збереження запису.");
+        }
+    };
+
+    const removeEntry = async (id) => {
+        if (!db || !userId || !isLoggedIn) {
+            showMessage("Помилка: не увійшли. Неможливо видалити.");
+            return;
+        }
+        
+        try {
+            const docRef = doc(db, `/artifacts/${appId}/users/${userId}/passwords`, id);
+            await deleteDoc(docRef);
+            showMessage('Запис видалено успішно!');
+        } catch (error) {
+            console.error("Помилка видалення запису:", error);
+            showMessage("Помилка видалення запису.");
+        }
+    };
+
+    // --- Функції для UI та взаємодії ---
+
+    const handleEntryChange = (id, field, value) => {
+        const updatedPasswords = passwords.map(entry => {
+            if (entry.id === id) {
+                return { ...entry, [field]: value };
+            }
+            return entry;
+        });
+        setPasswords(updatedPasswords);
+
+        const entryToUpdate = updatedPasswords.find(entry => entry.id === id);
+        if (entryToUpdate) {
+            saveEntry(entryToUpdate);
+        }
+    };
+    
+    const handleAddEntry = () => {
+        const newEntry = {
+            website: '',
+            category: '',
+            username: '',
+            password: '',
+            notes: '',
+            timestamp: Date.now(),
+        };
+        saveEntry(newEntry);
+    }
+    
+    const handleRemoveEntry = (id) => {
+      const confirmed = window.confirm("Ви впевнені, що хочете видалити цей запис?");
+      if (confirmed) {
+        removeEntry(id);
+      }
+    };
+    
+    const handleLoginKeydown = (e) => {
+        if (e.key === 'Enter') {
+            if (loginMode === 'login') {
+                handleLogin();
+            } else {
+                handleRegister();
+            }
+        }
+    };
+
+    const populateCategoryFilter = (entries) => {
+        const categories = new Set(entries.map(entry => entry.category).filter(c => c));
+        setAllCategories(Array.from(categories).sort());
+    };
+
+    const filteredPasswords = passwords.filter(entry => {
+        const searchTermLower = searchTerm.toLowerCase();
+        const categoryLower = categoryFilter.toLowerCase();
+        
+        const matchesSearch = 
+            entry.website.toLowerCase().includes(searchTermLower) ||
+            entry.username.toLowerCase().includes(searchTermLower) ||
+            entry.notes.toLowerCase().includes(searchTermLower);
+        
+        const matchesCategory = categoryLower === '' || entry.category.toLowerCase() === categoryLower;
+        
+        return matchesSearch && matchesCategory;
+    });
+
+    const togglePasswordVisibility = (e, field) => {
+        const input = e.target.closest('.relative').querySelector('input');
+        if (input) {
+            input.type = input.type === 'password' ? 'text' : 'password';
+            if (field === 'master') {
+                setShowMasterPassword(!showMasterPassword);
+            } else if (field === 'login') {
+                setShowLoginPassword(!showLoginPassword);
+            }
+        }
+    };
+
+    const copyToClipboard = (text) => {
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(text).then(() => {
+                showMessage('Скопійовано!');
+            }).catch(err => {
+                console.error('Не вдалося скопіювати: ', err);
+                showMessage('Помилка копіювання.');
+            });
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                showMessage('Скопійовано!');
+            } catch (err) {
+                console.error('Не вдалося скопіювати: ', err);
+                showMessage('Помилка копіювання.');
+            } finally {
+                document.body.removeChild(textarea);
+            }
+        }
+    };
+
+    // --- Функції генератора паролів ---
+    const generatePassword = () => {
+      let characters = '';
+      if (genUppercase) characters += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      if (genLowercase) characters += 'abcdefghijklmnopqrstuvwxyz';
+      if (genNumbers) characters += '0123456789';
+      if (genSymbols) characters += '!@#$%^&*()_+~`|}{[]:;?><,./-=';
+
+      if (characters.length === 0) {
+        setGeneratedPassword('');
+        showMessage('Оберіть хоча б один тип символів!');
+        return;
+      }
+
+      let password = '';
+      for (let i = 0; i < genLength; i++) {
+        const randomIndex = Math.floor(Math.random() * characters.length);
+        password += characters[randomIndex];
+      }
+      setGeneratedPassword(password);
+      showMessage('Пароль згенеровано!');
+    };
+
+    // --- Експорт/імпорт даних ---
+    const exportData = () => {
+      if (!isLoggedIn) {
+          showMessage("Будь ласка, увійдіть, щоб експортувати дані.");
+          return;
+      }
+      if (passwords.length === 0) {
+          showMessage('Немає даних для експорту.');
+          return;
+      }
+
+      const headers = ["Вебсайт/Сервіс", "Категорія", "Ім'я користувача/Email", "Пароль", "Примітки"];
+      const csvRows = [];
+      csvRows.push(headers.join(','));
+
+      passwords.forEach(entry => {
+          const values = [
+              `"${entry.website.replace(/"/g, '""')}"`,
+              `"${entry.category.replace(/"/g, '""')}"`,
+              `"${entry.username.replace(/"/g, '""')}"`,
+              `"${entry.password.replace(/"/g, '""')}"`,
+              `"${entry.notes.replace(/"/g, '""')}"`
+          ];
+          csvRows.push(values.join(','));
+      });
+
+      const csvString = csvRows.join('\n');
+      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'password_manager_data.csv';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showMessage('Дані експортовано в CSV!');
+    };
+    
+    const importData = (event) => {
+        const file = event.target.files[0];
+        if (!file) {
+            return;
+        }
+
+        if (!isLoggedIn) {
+            showMessage("Будь ласка, увійдіть, щоб імпортувати дані.");
+            event.target.value = ''; 
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = async function(e) {
+            try {
+                const csvString = e.target.result;
+                const lines = csvString.split('\n').filter(line => line.trim() !== '');
+                if (lines.length < 2) {
+                    showMessage('Недійсний CSV файл або відсутні дані.');
+                    return;
+                }
+
+                const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+
+                for (let i = 1; i < lines.length; i++) {
+                    const values = parseCsvLine(lines[i]);
+                    const entry = {};
+                    headers.forEach((header, index) => {
+                        entry[header] = values[index] || '';
+                    });
+                    
+                    const newEntry = {
+                      website: entry["Вебсайт/Сервіс"] || '',
+                      category: entry["Категорія"] || '',
+                      username: entry["Ім'я користувача/Email"] || '',
+                      password: entry["Пароль"] || '',
+                      notes: entry["Примітки"] || '',
+                      timestamp: Date.now()
+                    };
+                    
+                    await saveEntry(newEntry);
+                }
+
+                showMessage('Дані успішно імпортовано!');
+            } catch (error) {
+                console.error('Помилка імпорту CSV:', error);
+                showMessage('Помилка при імпорті даних CSV.');
+            } finally {
+                event.target.value = ''; 
+            }
+        };
+        reader.readAsText(file);
+    };
+    
+    const parseCsvLine = (line) => {
+        const result = [];
+        let inQuote = false;
+        let currentField = '';
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === '"') {
+                if (i + 1 < line.length && line[i + 1] === '"') {
+                    currentField += '"';
+                    i++;
+                } else {
+                    inQuote = !inQuote;
+                }
+            } else if (char === ',' && !inQuote) {
+                result.push(currentField.trim());
+                currentField = '';
+            } else {
+                currentField += char;
+            }
+        }
+        result.push(currentField.trim());
+        return result;
+    };
+
+
+    if (!isAuthReady) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-900 text-teal-300">
+                <p>Завантаження...</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="p-4 sm:p-8 flex flex-col items-center min-h-screen bg-gray-900 text-gray-200 font-inter">
+            {/* Модальне вікно входу/реєстрації */}
+            {showLoginModal && (
+                <div className="fixed inset-0 bg-gray-900 bg-opacity-95 flex items-center justify-center z-50">
+                    <div className="bg-gray-800 p-8 rounded-lg shadow-xl border border-gray-700 w-full max-w-md text-center space-y-6">
+                        <h2 className="text-2xl font-bold text-teal-300 mb-4">
+                            {loginMode === 'login' ? 'Увійти' : 'Зареєструватися'}
+                        </h2>
+                        
+                        <input
+                            type="email"
+                            value={userEmail}
+                            onChange={(e) => setUserEmail(e.target.value)}
+                            placeholder="Електронна пошта"
+                            className="w-full rounded-md bg-gray-700 border-gray-600 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-3 text-lg"
+                        />
+                        <div className="relative">
+                            <input
+                                type={showLoginPassword ? 'text' : 'password'}
+                                value={loginPassword}
+                                onChange={(e) => setLoginPassword(e.target.value)}
+                                onKeyDown={handleLoginKeydown}
+                                placeholder="Пароль облікового запису"
+                                className="w-full rounded-md bg-gray-700 border-gray-600 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-3 text-lg pr-12"
+                            />
+                            <button
+                                type="button"
+                                onClick={(e) => togglePasswordVisibility(e, 'login')}
+                                className="absolute inset-y-0 right-0 pr-3 flex items-center text-sm leading-5 text-teal-200 hover:text-teal-50 focus:outline-none"
+                            >
+                                {showLoginPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                            </button>
+                        </div>
+                        <div className="relative">
+                            <input
+                                type={showMasterPassword ? 'text' : 'password'}
+                                value={masterPassword}
+                                onChange={(e) => setMasterPassword(e.target.value)}
+                                onKeyDown={handleLoginKeydown}
+                                placeholder="Майстер-пароль"
+                                className="w-full rounded-md bg-gray-700 border-gray-600 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-3 text-lg pr-12"
+                            />
+                            <button
+                                type="button"
+                                onClick={(e) => togglePasswordVisibility(e, 'master')}
+                                className="absolute inset-y-0 right-0 pr-3 flex items-center text-sm leading-5 text-teal-200 hover:text-teal-50 focus:outline-none"
+                            >
+                                {showMasterPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                            </button>
+                        </div>
+                        
+                        {loginMode === 'login' && (
+                            <button
+                                onClick={handleLogin}
+                                className="w-full inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition ease-in-out duration-150 btn-hover-scale"
+                            >
+                                <LogIn size={20} className="mr-2" />
+                                Увійти
+                            </button>
+                        )}
+                        {loginMode === 'register' && (
+                            <button
+                                onClick={handleRegister}
+                                className="w-full inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 transition ease-in-out duration-150 btn-hover-scale"
+                            >
+                                <UserPlus size={20} className="mr-2" />
+                                Зареєструватися
+                            </button>
+                        )}
+                        
+                        <button
+                            onClick={() => setLoginMode(loginMode === 'login' ? 'register' : 'login')}
+                            className="w-full inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-yellow-300 bg-gray-700 hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 transition ease-in-out duration-150 btn-hover-scale"
+                        >
+                            <ArrowLeftRight size={20} className="mr-2"/>
+                            {loginMode === 'login' ? 'Немає облікового запису? Зареєструватися' : 'Вже маєте обліковий запис? Увійти'}
+                        </button>
+
+                        {loginMessage && (
+                            <p className="text-red-400 mt-2">{loginMessage}</p>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Основний вміст програми */}
+            {isLoggedIn && (
+                <div className="max-w-4xl w-full bg-gray-800 shadow-xl rounded-xl p-6 sm:p-8 space-y-6 border border-gray-700">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl sm:text-4xl font-extrabold text-white">
+                            <span className="text-gradient">Менеджер паролів</span>
+                        </h1>
+                        <div className="flex items-center space-x-4">
+                            <div className="hidden sm:block text-sm text-gray-400">
+                                <span className="text-teal-300">Ваш ID:</span> {userId || 'Невідомий'}
+                            </div>
+                            <button onClick={handleLogout} className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-red-300 bg-gray-700 hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition ease-in-out duration-150 btn-hover-scale">
+                                <Power size={20} className="mr-2"/>
+                                Вийти
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Розділ генератора паролів */}
+                    <div className="bg-gray-700 p-4 rounded-lg shadow-sm border border-gray-600 mb-6">
+                        <h2 className="text-xl font-bold text-teal-300 mb-4 pb-2 border-b border-gray-600">Генератор паролів</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-teal-200">
+                            <div>
+                                <label className="block text-sm font-medium mb-1">Довжина пароля:</label>
+                                <input
+                                    type="number"
+                                    value={genLength}
+                                    onChange={(e) => setGenLength(Math.max(6, Math.min(32, e.target.value)))}
+                                    min="6" max="32"
+                                    className="mt-1 block w-full rounded-md bg-gray-600 border-gray-500 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-2"
+                                />
+                            </div>
+                            <div className="flex items-center space-x-4 mt-2 md:mt-0">
+                                <label className="inline-flex items-center">
+                                    <input type="checkbox" checked={genUppercase} onChange={() => setGenUppercase(!genUppercase)} className="form-checkbox h-5 w-5 text-emerald-600 rounded"/>
+                                    <span className="ml-2">Великі літери</span>
+                                </label>
+                                <label className="inline-flex items-center">
+                                    <input type="checkbox" checked={genLowercase} onChange={() => setGenLowercase(!genLowercase)} className="form-checkbox h-5 w-5 text-emerald-600 rounded"/>
+                                    <span className="ml-2">Малі літери</span>
+                                </label>
+                            </div>
+                            <div className="flex items-center space-x-4">
+                                <label className="inline-flex items-center">
+                                    <input type="checkbox" checked={genNumbers} onChange={() => setGenNumbers(!genNumbers)} className="form-checkbox h-5 w-5 text-emerald-600 rounded"/>
+                                    <span className="ml-2">Цифри</span>
+                                </label>
+                                <label className="inline-flex items-center">
+                                    <input type="checkbox" checked={genSymbols} onChange={() => setGenSymbols(!genSymbols)} className="form-checkbox h-5 w-5 text-emerald-600 rounded"/>
+                                    <span className="ml-2">Символи</span>
+                                </label>
+                            </div>
+                            <div className="flex flex-col sm:flex-row gap-2 mt-2">
+                                <input type="text" value={generatedPassword} readOnly placeholder="Згенерований пароль"
+                                    className="flex-grow rounded-md bg-gray-600 border-gray-500 text-white shadow-sm p-2"/>
+                                <button onClick={generatePassword} className="inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 transition ease-in-out duration-150 btn-hover-scale">
+                                    Згенерувати
+                                </button>
+                                <button onClick={() => copyToClipboard(generatedPassword)} className="inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition ease-in-out duration-150 btn-hover-scale">
+                                    <Copy size={16} className="mr-1"/> Копіювати
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Розділ пошуку та фільтрації */}
+                    <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label htmlFor="search" className="block text-lg font-medium text-teal-200 mb-2">Пошук паролів</label>
+                            <input
+                                type="text"
+                                id="search"
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                placeholder="Введіть для пошуку (вебсайт, логін, примітки)"
+                                className="w-full rounded-md bg-gray-700 border-gray-600 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-3 text-lg"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="categoryFilter" className="block text-lg font-medium text-teal-200 mb-2">Фільтр за категорією</label>
+                            <select
+                                id="categoryFilter"
+                                value={categoryFilter}
+                                onChange={(e) => setCategoryFilter(e.target.value)}
+                                className="w-full rounded-md bg-gray-700 border-gray-600 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-3 text-lg"
+                            >
+                                <option value="">Всі категорії</option>
+                                {allCategories.map(cat => (
+                                    <option key={cat} value={cat}>{cat}</option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+
+                    {/* Кнопки додати, експорту/імпорту */}
+                    <div className="mb-8 flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4">
+                         <button onClick={handleAddEntry} className="w-full sm:w-auto inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition ease-in-out duration-150 btn-hover-scale">
+                             <Plus size={20} className="mr-2"/>
+                             Додати новий запис
+                         </button>
+                         <button onClick={exportData} className="w-full sm:w-auto inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-yellow-300 bg-gray-700 hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 transition ease-in-out duration-150 btn-hover-scale">
+                            Експортувати дані (CSV)
+                        </button>
+                        <label htmlFor="importFile" className="w-full sm:w-auto inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-emerald-300 bg-gray-700 hover:bg-gray-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition ease-in-out duration-150 btn-hover-scale">
+                            Імпортувати дані (CSV)
+                            <input type="file" id="importFile" accept=".csv" onChange={importData} className="hidden"/>
+                        </label>
+                    </div>
+
+                    <div id="passwordEntries" className="space-y-4">
+                        {filteredPasswords.length > 0 ? (
+                            filteredPasswords.map(entry => (
+                                <div key={entry.id} className="bg-gray-700 p-4 rounded-lg shadow-sm border border-gray-600">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-teal-200">Вебсайт/Сервіс</label>
+                                            <input
+                                                type="text"
+                                                value={entry.website}
+                                                onChange={(e) => handleEntryChange(entry.id, 'website', e.target.value)}
+                                                className="mt-1 block w-full rounded-md bg-gray-600 border-gray-500 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-2"
+                                                placeholder="Наприклад, Google, Facebook"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-teal-200">Категорія</label>
+                                            <input
+                                                type="text"
+                                                value={entry.category}
+                                                onChange={(e) => handleEntryChange(entry.id, 'category', e.target.value)}
+                                                className="mt-1 block w-full rounded-md bg-gray-600 border-gray-500 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-2"
+                                                placeholder="Наприклад, Соцмережі, Фінанси"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-teal-200">Ім'я користувача/Email</label>
+                                            <input
+                                                type="text"
+                                                value={entry.username}
+                                                onChange={(e) => handleEntryChange(entry.id, 'username', e.target.value)}
+                                                className="mt-1 block w-full rounded-md bg-gray-600 border-gray-500 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-2"
+                                                placeholder="Ваш логін"
+                                            />
+                                        </div>
+                                        <div className="md:col-span-1">
+                                            <label className="block text-sm font-medium text-teal-200">Пароль</label>
+                                            <div className="relative mt-1">
+                                                <input
+                                                    type="password"
+                                                    value={entry.password}
+                                                    onChange={(e) => handleEntryChange(entry.id, 'password', e.target.value)}
+                                                    className="block w-full rounded-md bg-gray-600 border-gray-500 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 pr-10 p-2"
+                                                    placeholder="Ваш пароль"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => togglePasswordVisibility(e, 'entry')}
+                                                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-sm leading-5 text-teal-200 hover:text-teal-50 focus:outline-none"
+                                                >
+                                                    <Eye size={20} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="md:col-span-2">
+                                            <label className="block text-sm font-medium text-teal-200">Примітки</label>
+                                            <textarea
+                                                rows="2"
+                                                value={entry.notes}
+                                                onChange={(e) => handleEntryChange(entry.id, 'notes', e.target.value)}
+                                                className="mt-1 block w-full rounded-md bg-gray-600 border-gray-500 text-white shadow-sm focus:border-teal-400 focus:ring focus:ring-teal-400 focus:ring-opacity-50 p-2"
+                                                placeholder="Додаткові нотатки"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="mt-4 flex flex-col sm:flex-row justify-end space-y-2 sm:space-y-0 sm:space-x-2">
+                                        <button onClick={() => copyToClipboard(entry.password)} className="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition ease-in-out duration-150 btn-hover-scale">
+                                            <Copy size={16} className="mr-1"/> Копіювати пароль
+                                        </button>
+                                        <button onClick={() => handleRemoveEntry(entry.id)} className="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition ease-in-out duration-150 btn-hover-scale">
+                                            <Trash size={16} className="mr-1"/> Видалити
+                                        </button>
+                                    </div>
+                                </div>
+                            ))
+                        ) : (
+                            <p className="text-center text-gray-400">Не знайдено жодного запису. Додайте новий або імпортуйте дані.</p>
+                        )}
+                    </div>
+
+                    {/* Модальне вікно повідомлення */}
+                    {messageBox.visible && createPortal(
+                        <div className="fixed bottom-4 right-4 bg-teal-900 text-white px-4 py-3 rounded-lg shadow-lg z-50 transition-transform duration-300 transform animate-pulse">
+                            {messageBox.message}
+                        </div>,
+                        document.body
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
+export default App;
